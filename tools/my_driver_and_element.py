@@ -358,8 +358,8 @@ class MyDriver(object):
             raise RuntimeError('MyDriver对象初始化时没有传参数serial')
         if position is None:
             position = position_dict[element_key]
-            os.system(
-            "adb -s %s shell input tap %d %d" % (self.serial, position[0], position[1]))
+        os.system(
+        "adb -s %s shell input tap %d %d" % (self.serial, position[0], position[1]))
 
     def ai_click(self, value, position_dict=None, **kwargs):
         if position_dict is None:
