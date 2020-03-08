@@ -16,6 +16,44 @@ import socket
 from appium_robot.robot.wechat_work.setting import XPATH_OBJECT_ALL_VERSIONS
 
 
+def start_server(serial: str, port: int, executable=True) -> None:
+    """
+    :param port:
+    :param serial:
+    :return:
+    """
+    chromedriver_path = get_chromedriver_path()
+    print(chromedriver_path)
+    if executable:
+        cmd = ('echo $SHELL; appium --chromedriver-executable ' + chromedriver_path +
+               ' --address 127.0.0.1' + ' --port ' + str(port) +
+               ' --bootstrap-port ' + str(port - 2000) + ' --default-capabilities ' + """'{"udid":"%s"}'""" % serial +
+               ' --log-level error &')
+    else:
+        cmd = ('echo $SHELL; appium' +
+               ' --address 127.0.0.1' + ' --port ' + str(port) +
+               ' --bootstrap-port ' + str(port - 2000) + ' --default-capabilities ' + """'{"udid":"%s"}'""" % serial +
+               ' --log-level error &')
+    subprocess.Popen(cmd, shell=True, executable='/bin/bash')
+    # os.popen(cmd)
+
+
+def kill_server(serial, description):
+    """
+    kill adb
+    :return: None
+    """
+    list_adb = "ps aux | grep %s | grep -v %s | grep -v tmux" % (serial, description)
+    find_process = os.popen(list_adb).readlines()
+    for process in find_process:
+        if "grep" not in process:
+            print("kill ", process)
+            pid = re.search(r'\w+\s+(\d+)', process).group(1)
+            kill_command = "kill -9 %s" % pid
+            os.system(kill_command)
+    print("kill %s adb server" % serial)
+
+
 def init_driver(serial=None, appPackage="com.tencent.mm", appActivity=".ui.LauncherUI"):
     flag = socket.gethostname() == 'achens-iMac.lan'
     serial = get_valid_serial(serial)
