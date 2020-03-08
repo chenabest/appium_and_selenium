@@ -1,5 +1,6 @@
 from config import SENTRY
 from selenium.common.exceptions import NoSuchElementException
+from appium.webdriver.common.touch_action import TouchAction
 import time
 from selenium.webdriver.common.by import By
 import sys
@@ -9,6 +10,7 @@ from functools import wraps
 from traceback import print_exc
 import os
 import re
+import random
 
 """
 关于参数配置
@@ -21,8 +23,8 @@ RETRY = Retry()
 IS_ELEMENT_PRESENT_TIMEOUT = 1
 BACK_WAIT_TIME = 1
 SWIPE_WAIT_TIME = 1.5
-MAX_RETRIES = 4
-CLICK_WAIT_TIME = 0.25
+MAX_RETRIES = 1
+CLICK_WAIT_TIME = 0.8
 EXPONENTIAL_BASE = 1
 EXPECT_ELEMENT = None
 """
@@ -61,25 +63,83 @@ print('公共配置：')
 print('expect_element=%s' % EXPECT_ELEMENT)
 
 
-def expectation(method, _expect_element=None, _max_retries=1, _wait_time=1, _relation='or', _rtn=1, _raise_exception=True):
+def expectation(method, _expect_element=EXPECT_ELEMENT, _max_retries=MAX_RETRIES, _wait_time=1, _exponential_base=1,
+                _relation='or', _rtn=1, _raise_exception=True):
+    """
+    功能：装饰一个方法，判断页面是否出现期望的元素，以此来判断该方法是否执行成功，如果成功，直接将期望的元素作为返回值
+    若expect_element的值是目标元素的xpath等，则执行方法后自动用相适应的方法找目标元素，如果找到了则认为方法执行成功
+    若expect_element的值是'page_source'，则比较执行方法后的page_source的值，如果不同则认为方法执行成功
+    若expect_element的值是正则表达式，则执行方法后，在page_source中匹配该模式，如果匹配成功，则认为方法执行成功
+    若expect_element的是列表，当relation值是'or'时，默认返回第一个找到的元素；当relation值是'and'时,必须找到所有元素，返回第rtn个元素。
+    若expect_element是None，只是单纯执行方法动作，不关心方法执行后效果。
+    :param method: 被装饰的方法
+    :param _expect_element: str类型,值可以是'page_source', 正则表达式，目标元素Xpath等，或者None。
+    :param _max_retries: 最大重试次数
+    :param _wait_time: 第一次执行方法后的等待时间
+    :param _exponential_base: 等待时间的相关参数，等待时间=wait_time * exponential_base ** times
+    :param _relation: 取值为'and'或者'or', 当expect_element为列表时需要用到
+    :param _rtn: 取值为整数，当expect_element有多个元素时需要根据rtn参数决定返回第几个元素。rtn=0时返回self
+    :param _raise_exception: bool类型，当未发现期望元素时，根据_raise_exception的值确定是否抛出异常
+    :return: MyDriver或者MyElement对象
+    """
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         expect_element = kwargs.get('expect_element', _expect_element)
         max_retries = kwargs.get('max_retries', _max_retries)
         wait_time = kwargs.get('wait_time', _wait_time)
+        exponential_base = kwargs.get('exponential_base', _exponential_base)
         relation = kwargs.get('relation', _relation)
         rtn = kwargs.get('rtn', _rtn)
         raise_exception = kwargs.get('raise_exception', _raise_exception)
         kwargs['raise_exception'] = True
-        if isinstance(expect_element, list):
+        driver = self if isinstance(self, MyDriver) else self.driver
+        if isinstance(expect_element, str):
+            if expect_element.startswith('/') or '[@' in expect_element or 'contains(@' in expect_element:
+                for times in range(max_retries+1):
+                    method(self, *args, **kwargs)
+                    time.sleep(wait_time * exponential_base ** times)
+                    try:
+                        return driver.find_element_by_xpath(expect_element, **kwargs)
+                    except NoSuchElementException:
+                        pass
+                if raise_exception:
+                    raise NoSuchElementException(f'执行方法{method.__name__}后，未找到期望出现的元素:%s' % expect_element)
+            elif expect_element == 'page_source':
+                page_source = driver.page_source
+                for times in range(max_retries + 1):
+                    method(self, *args, **kwargs)
+                    time.sleep(wait_time * exponential_base ** times)
+                    if driver.page_source != page_source:
+                        return self
+                if raise_exception:
+                    raise Exception(f'执行方法{method.__name__}后，页面无变化')
+            elif 'new UiSelector' not in expect_element:
+                for times in range(max_retries + 1):
+                    method(self, *args, **kwargs)
+                    time.sleep(wait_time * exponential_base ** times)
+                    if re.search(expect_element, driver.page_source):
+                        return self
+                if raise_exception:
+                    raise Exception(f'执行方法{method.__name__}后，页面未出现"{expect_element}"')
+            else:
+                for times in range(max_retries+1):
+                    method(self, *args, **kwargs)
+                    time.sleep(wait_time * exponential_base ** times)
+                    try:
+                        return driver.find_element_by_android_uiautomator(expect_element, **kwargs)
+                    except NoSuchElementException:
+                        pass
+                if raise_exception:
+                    raise NoSuchElementException(f'执行方法{method.__name__}后，未找到期望出现的元素:%s' % expect_element)
+        elif isinstance(expect_element, list):
             if relation == 'or':
                 for times in range(max_retries+1):
                     method(self, *args, **kwargs)
-                    time.sleep(wait_time)
+                    time.sleep(wait_time * exponential_base ** times)
                     flag = False
                     for value in expect_element:
                         try:
-                            element = self.find_element_by_xpath(value, **kwargs)
+                            element = driver.find_element_by_xpath(value, **kwargs)
                             flag = True
                             break
                         except NoSuchElementException:
@@ -95,13 +155,12 @@ def expectation(method, _expect_element=None, _max_retries=1, _wait_time=1, _rel
                     raise Exception(f'执行方法{method.__name__}后，未找到期望元素列表:%s中的任一元素' % str(expect_element))
             elif relation == 'and':
                 for times in range(max_retries+1):
-                    # self.driver.swipe(start_x, start_y, end_x, end_y, duration)
                     method(self, *args, **kwargs)
-                    time.sleep(wait_time)
+                    time.sleep(wait_time * exponential_base ** times)
                     elements = list()
                     for value in expect_element:
                         try:
-                            element = self.find_element_by_xpath(value, **kwargs)
+                            element = driver.find_element_by_xpath(value, **kwargs)
                             elements.append(element)
                         except NoSuchElementException:
                             elements = list()
@@ -115,37 +174,12 @@ def expectation(method, _expect_element=None, _max_retries=1, _wait_time=1, _rel
                     raise Exception(f'执行方法{method.__name__}后，未找到期望元素列表:%s中的全部元素' % str(expect_element))
             else:
                 raise ValueError('relation值不对')
-        elif expect_element == 'page_source':
-            page_source = self.page_source
-            for times in range(max_retries + 1):
-                method(self, *args, **kwargs)
-                time.sleep(wait_time)
-                if self.page_source != page_source:
-                    return self
-            if raise_exception:
-                raise Exception(f'执行方法{method.__name__}后，页面无变化')
-        elif expect_element is not None and re.match('\w+$', expect_element):
-            for times in range(max_retries + 1):
-                method(self, *args, **kwargs)
-                time.sleep(wait_time)
-                if expect_element in self.page_source:
-                    return self
-            if raise_exception:
-                raise Exception(f'执行方法{method.__name__}后，页面未出现"{expect_element}"')
-        elif expect_element is not None:
-            for times in range(max_retries+1):
-                method(self, *args, **kwargs)
-                time.sleep(wait_time)
-                try:
-                    return self.find_element_by_xpath(expect_element, **kwargs)
-                except NoSuchElementException:
-                    pass
-            if raise_exception:
-                raise NoSuchElementException(f'执行方法{method.__name__}后，未找到期望出现的元素:%s' % expect_element)
-        else:
+        elif expect_element is None:
             method(self, *args, **kwargs)
             time.sleep(wait_time)
             return self
+        else:
+            raise ValueError('expect_element值必须为字符串或者元素类型为字符串的列表!')
     return wrapper
 
 
@@ -160,6 +194,7 @@ class MyDriver(object):
         self.serial = serial
         self.position_dict = position_dict
         self.xpath_list = xpath_list
+        self.touch_action = TouchAction(self.driver)
 
     @RETRY.retry_until_done_or_timeout
     def find_element_by_xpath(self, xpath, element_name=None, position_dict=None, xpath_list=None, **kwargs):
@@ -269,7 +304,7 @@ class MyDriver(object):
             raise ValueError('value值不对')
 
     def find_element_and_click(self, value, expect_element=EXPECT_ELEMENT, max_retries=MAX_RETRIES,
-                               click_wait_time=CLICK_WAIT_TIME, exponential_base=EXPONENTIAL_BASE,
+                               wait_time=CLICK_WAIT_TIME, exponential_base=EXPONENTIAL_BASE,
                                relation='or', rtn=1, **kwargs):
         """
                 点击元素。
@@ -280,7 +315,7 @@ class MyDriver(object):
                 :param value: 要找的元素的Xpath或则其他定位信息
                 :param expect_element: 取值page_source（默认）, 期望点击后出现的元素的Xpath或则其他定位信息，或者None。
                 :param max_retries: 最大重试次数
-                :param click_wait_time: 第一次点击后的等待时间
+                :param wait_time: 第一次点击后的等待时间
                 :param exponential_base: 等待时间的相关参数，等待时间=wait_time * exponential_base ** times
                 :param relation: 取值为'and'或者'or', 当expect_element为列表时需要用到
                 :param rtn: 取值为整数，当expect_element有多个元素时需要根据rtn参数决定返回第几个元素。rtn=0时返回self
@@ -293,37 +328,38 @@ class MyDriver(object):
             element = self.find_element_by_adaptor(value, **kwargs)
             if element:
                 expect = element.click(expect_element=expect_element, max_retries=0,
-                                       click_wait_time=click_wait_time,  exponential_base=exponential_base,
+                                       wait_time=wait_time, exponential_base=exponential_base,
                                        relation=relation, rtn=rtn, **kwargs)
                 if expect:
                     return expect
                 elif times == max_retries:
                     print('点击元素【%s】后,未找到期望出现的元素:%s' % (value, expect_element))
         if raise_exception:
-            raise NoSuchElementException
+            raise NoSuchElementException(f'find_element_and_click方法出错，未定位到元素: {value}')
 
     @property
     def page_source(self):
         return self.driver.page_source
 
-    def detect_page_source(self, target: str, poll_frequency=2, exponential_base=2, max_tries=3):
+    def detect_page_source(self, target: str, poll_frequency=1, exponential_base=1, max_tries=3) -> bool:
         """
         功能：检查page_source是否出现给定的文本
-        :param target: 目标的文本
+        :param target: 正则表达式，匹配目标文本
         :param poll_frequency: 重试频率
         :param exponential_base: 指数底数，决定等待时间。
         :param max_tries: 最大检查次数
         :return: True 或 False
         """
         for times in range(max_tries):
-            if target in self.page_source:
+            if re.search(target, self.page_source):
                 print(f"target:{target} detected")
                 return True
-            time.sleep(poll_frequency * exponential_base ** times)
+            if times < max_tries-1:
+                time.sleep(poll_frequency * exponential_base ** times)
         print(f"target:{target} not detected")
         return False
 
-    def get_current_activity(self, poll_frequency=2, duration=6, max_time=8):
+    def get_current_activity(self, poll_frequency=1, duration=6, max_time=8):
         current_activity = self.driver.current_activity
         _start_time = start_time = time.time()
         while True:
@@ -337,7 +373,15 @@ class MyDriver(object):
                 break
         return current_activity
 
-    def write_page_source_to_txt(self, file_path, error=None):
+    def write_page_source_to_xml(self, file_path, error=None):
+        """
+        把page_source写入xml文件
+        :param file_path: xml文件路径(包含文件名称)
+        :param error: 捕获到的异常
+        :return: self
+        """
+        if not file_path.endswith('.xml'):
+            file_path += '.xml'
         if error:
             logger_fh = set_logger(log_file_path=file_path, output=False)
             logger_fh.exception("Exception Logged")
@@ -355,118 +399,37 @@ class MyDriver(object):
     def get_window_size(self):
         return self.driver.get_window_size()
 
-    def swipe(self, start_x, start_y, end_x, end_y, duration=None,
-              expect_element=EXPECT_ELEMENT, max_retries=MAX_RETRIES,
-              swipe_wait_time=SWIPE_WAIT_TIME, relation='or', rtn=1, **kwargs):
+    @expectation
+    def swipe(self, start_x, start_y, end_x, end_y, duration=None, wait_time=SWIPE_WAIT_TIME, **kwargs):
         """
         执行滑动动作
-        若expect_element的是列表，当relation值是'or'时，默认返回第一个找到的元素；当relation值是'and'时,必须找到所有元素，返回第trn个元素。
-        若expect_element的值是'page_source'，则比较滑动后的page_source的值，如果不同则认为滑动成功
-        若expect_element的值是目标元素的xpath等，则滑动后自动用相适应的方法找目标元素，如果找到了则认为滑动成功
-        若expect_element是None，只是单纯执行滑动动作，不关心滑动后效果。
-        :param start_x: 
-        :param start_y: 
-        :param end_x: 
-        :param end_y: 
-        :param duration: 
-        :param expect_element: 取值page_source（默认）, 目标元素Xpath，或者None。
-        :param max_retries: 最大重试次数
-        :param swipe_wait_time: 滑动后等待时间
-        :param relation: 取值为'and'或者'or', 当expect_element为列表时需要用到
-        :param rtn: 取值为整数，当expect_element有多个元素时需要根据rtn参数决定返回第几个元素。rtn=0时返回self
+        :param start_x: 滑动起始位置横坐标
+        :param start_y: 滑动起始位置纵坐标
+        :param end_x: 滑动结束位置横坐标
+        :param end_y: 滑动结束位置纵坐标
+        :param duration: 滑动操作持续时间
+        :param wait_time: 第一次的滑动后等待时间
         :param kwargs: 其他参数，最终会传到Retry装饰器里面
         :return: self或者MyElement对象
         """
-        raise_exception = kwargs.get('raise_exception', True)
-        kwargs['raise_exception'] = True
-        if isinstance(expect_element, list):
-            if relation == 'or':
-                for times in range(max_retries+1):
-                    self.driver.swipe(start_x, start_y, end_x, end_y, duration)
-                    time.sleep(swipe_wait_time)
-                    flag = False
-                    for value in expect_element:
-                        try:
-                            element = self.find_element_by_adaptor(value, **kwargs)
-                            flag = True
-                            break
-                        except NoSuchElementException:
-                            pass
-                    if flag:
-                        if rtn == 1:
-                            return element
-                        elif rtn == 0:
-                            return self
-                        else:
-                            raise ValueError('rtn值不对')
-                if raise_exception:
-                    raise Exception('执行滑动操作后, 未找到元素列表:%s中的任一元素' % str(expect_element))
-            elif relation == 'and':
-                for times in range(max_retries+1):
-                    self.driver.swipe(start_x, start_y, end_x, end_y, duration)
-                    time.sleep(swipe_wait_time)
-                    elements = list()
-                    for value in expect_element:
-                        try:
-                            element = self.find_element_by_adaptor(value, **kwargs)
-                            elements.append(element)
-                        except NoSuchElementException:
-                            elements = list()
-                            break
-                    if elements:
-                        if rtn == 0:
-                            return self
-                        else:
-                            return elements[rtn - 1]
-                if raise_exception:
-                    raise Exception('执行滑动操作后, 未找到元素列表:%s中的全部元素' % str(expect_element))
-            else:
-                raise ValueError('relation值不对')
-        elif expect_element == 'page_source':
-            page_source = self.page_source
-            for times in range(max_retries + 1):
-                self.driver.swipe(start_x, start_y, end_x, end_y, duration)
-                time.sleep(swipe_wait_time)
-                if self.page_source != page_source:
-                    return self
-            if raise_exception:
-                raise Exception('执行滑动操作后,页面无变化')
-        elif expect_element is not None and re.match('\w+$', expect_element):
-            for times in range(max_retries + 1):
-                self.driver.swipe(start_x, start_y, end_x, end_y, duration)
-                time.sleep(swipe_wait_time)
-                if expect_element in self.page_source:
-                    return self
-            if raise_exception:
-                raise Exception(f'执行滑动操作后,页面未出现"{expect_element}"')
-        elif expect_element is not None:
-            for times in range(max_retries+1):
-                self.driver.swipe(start_x, start_y, end_x, end_y, duration)
-                time.sleep(swipe_wait_time)
-                try:
-                    return self.find_element_by_adaptor(expect_element, **kwargs)
-                except NoSuchElementException:
-                    pass
-            if raise_exception:
-                raise NoSuchElementException('执行滑动操作后,未找到期望出现的元素:%s' % expect_element)
-        else:
-            self.driver.swipe(start_x, start_y, end_x, end_y, duration)
-            time.sleep(swipe_wait_time)
-            return self
+        self.driver.swipe(start_x, start_y, end_x, end_y, duration)
 
     @expectation
     def keyevent(self, keycode, metastate=None, **kwargs):
         self.driver.keyevent(keycode, metastate)
 
     @expectation
-    def adb_tap(self, position=None, element_key: str=None, position_dict=None,  click_wait_time=CLICK_WAIT_TIME, **kwargs):
+    def tap(self, x, y, count=1, wait_time=CLICK_WAIT_TIME, **kwargs):
+        self.touch_action.tap(x=x, y=y, count=count).perform()
+
+    @expectation
+    def adb_tap(self, position=None, element_key: str=None, position_dict=None, wait_time=CLICK_WAIT_TIME, **kwargs):
         if not self.serial:
             raise RuntimeError('MyDriver对象初始化时没有传参数serial')
         if position is None:
             position = position_dict[element_key]
         os.system(
             "adb -s %s shell input tap %d %d" % (self.serial, position[0], position[1]))
-        time.sleep(click_wait_time)
 
     def ai_click(self, value, position_dict=None, **kwargs):
         """
@@ -499,6 +462,7 @@ class MyDriver(object):
                 my_element.element.send_keys(content)
             return my_element
         else:
+            kwargs['expect_element'] = None
             self.adb_tap(element_key=value, position_dict=position_dict, **kwargs)
             self.adb_input_text(content, length)
             if check:
@@ -556,99 +520,30 @@ class MyDriver(object):
         except (NoSuchElementException, Exception):
             return False
 
-    def back(self, times=1, expect_element=EXPECT_ELEMENT, max_retries=MAX_RETRIES,
-             back_wait_time=BACK_WAIT_TIME,  relation='or', rtn=1, **kwargs):
-        raise_exception = kwargs.get('raise_exception', True)
-        kwargs['raise_exception'] = True
+    @expectation
+    def _back(self, wait_time=BACK_WAIT_TIME, **kwargs):
+        self.driver.back()
+
+    def back(self, times=1, wait_time=BACK_WAIT_TIME, **kwargs):
         for n in range(times-1):
             self.driver.back()
-            time.sleep(back_wait_time)
-        if isinstance(expect_element, list):
-            if relation == 'or':
-                for times in range(max_retries + 1):
-                    self.driver.back()
-                    time.sleep(back_wait_time)
-                    flag = False
-                    for value in expect_element:
-                        try:
-                            element = self.find_element_by_adaptor(value, **kwargs)
-                            flag = True
-                            break
-                        except NoSuchElementException:
-                            pass
-                    if flag:
-                        if rtn == 1:
-                            return element
-                        elif rtn == 0:
-                            return self
-                        else:
-                            raise ValueError('rtn值不对')
-                if raise_exception:
-                    raise Exception('执行返回操作后, 未找到元素列表:%s中的任一元素' % str(expect_element))
-            elif relation == 'and':
-                for times in range(max_retries + 1):
-                    self.driver.back()
-                    time.sleep(back_wait_time)
-                    elements = list()
-                    for value in expect_element:
-                        try:
-                            element = self.find_element_by_adaptor(value, **kwargs)
-                            elements.append(element)
-                        except NoSuchElementException:
-                            elements = list()
-                            break
-                    if elements:
-                        if rtn == 0:
-                            return self
-                        else:
-                            return elements[rtn - 1]
-                if raise_exception:
-                    raise Exception('执行返回操作后, 未找到元素列表:%s中的全部元素' % str(expect_element))
-        elif expect_element == 'page_source':
-            page_source = self.page_source
-            for times in range(max_retries+1):
-                self.driver.back()
-                time.sleep(back_wait_time)
-                if self.page_source != page_source:
-                    return self
-            if raise_exception:
-                raise Exception('执行返回操作后,页面无变化')
-        elif expect_element is not None and re.match('\w+$', expect_element):
-            for times in range(max_retries + 1):
-                self.driver.back()
-                time.sleep(back_wait_time)
-                if expect_element in self.page_source:
-                    return self
-            if raise_exception:
-                raise Exception(f'执行返回操作后,页面未出现"{expect_element}"')
-        elif expect_element is not None:
-            for times in range(max_retries + 1):
-                self.driver.back()
-                time.sleep(back_wait_time)
-                try:
-                    return self.find_element_by_adaptor(expect_element, **kwargs)
-                except NoSuchElementException:
-                    pass
-            if raise_exception:
-                raise NoSuchElementException('执行返回操作后,未找到期望出现的元素:%s' % expect_element)
-        else:
-            self.driver.back()
-            time.sleep(back_wait_time)
-            return self
+            time.sleep(wait_time)
+        return self._back(wait_time=wait_time, **kwargs)
 
     def quit(self):
         self.driver.quit()
 
 
 class MyElement(object):
-    def __init__(self, web_element, element_name, mydriver):
+    def __init__(self, web_element, element_name, my_driver):
         self.element = web_element
         self.name = element_name
-        self.driver = mydriver
+        self.driver = my_driver
+        self.touch_action = TouchAction(self.driver.driver)
 
     def send_keys(self, content, max_retries=MAX_RETRIES, raise_exception=True, wait_for_check_when_error_occur=15):
         self.element.send_keys(content)
-        for retry_times in range(max_retries):
+        for retry_times in range(max_retries+1):
             element_content = self.element.text
             if element_content == content:
                 return self
@@ -665,12 +560,6 @@ class MyElement(object):
                 #     print('输入框的内容不正确，将清空后重新输入…')
                 #     self.element.clear()
                 #     self.element.send_keys(content)
-        element_content = self.element.text
-        if element_content == content:
-            return self
-        elif element_content == '':
-            print('text属性无法获取输入文本内容，无法校验')
-            return self
         print(f'send_keys方法输入内容不正确，content:{content}, len(content):{len(content)}，'
               f'element_content:{element_content}, len(element_content):{len(element_content)}')
         time.sleep(wait_for_check_when_error_occur)
@@ -679,99 +568,16 @@ class MyElement(object):
         else:
             return self
 
-    def click(self, expect_element=EXPECT_ELEMENT, max_retries=MAX_RETRIES, click_wait_time=CLICK_WAIT_TIME,
-              exponential_base=EXPONENTIAL_BASE, relation='or', rtn=1, **kwargs):
+    @expectation
+    def click(self, wait_time=CLICK_WAIT_TIME, exponential_base=EXPONENTIAL_BASE, **kwargs):
         """
         点击元素。
-        若expect_element的是列表，当relation值是'or'时，默认返回第一个找到的元素；当relation值是'and'时,必须找到所有元素，返回第rtn个元素。
-        若expect_element的值是'page_source'，则比较点击后的page_source的值，如果不同则认为点击成功
-        若expect_element的值是目标元素的xpath等，则点击后自动用相适应的方法找目标元素，如果找到了则认为点击成功
-        若expect_element是None，只是单纯点击，不关心点击后效果。
-        :param expect_element: 取值page_source（默认）, 目标元素Xpath，或者None。
-        :param max_retries: 最大重试次数
-        :param click_wait_time: 第一次点击后的等待时间
+        :param wait_time: 第一次点击后的等待时间
         :param exponential_base: 等待时间的相关参数，等待时间=wait_time * exponential_base ** times
-        :param relation: 取值为'and'或者'or', 当expect_element为列表时需要用到
-        :param rtn: 取值为整数，当expect_element有多个元素时需要根据rtn参数决定返回第几个元素。rtn=0时返回self
-        :param kwargs:  其他参数，最终会传到Retry装饰器里面
+        :param kwargs: 其他参数，最终会传到Retry装饰器里面
         :return: self或者MyElement对象
         """
-        raise_exception = kwargs.get('raise_exception', True)
-        kwargs['raise_exception'] = True
-        if isinstance(expect_element, list):
-            if relation == 'or':
-                for times in range(max_retries+1):
-                    self.element.click()
-                    time.sleep(click_wait_time * exponential_base ** times)
-                    flag = False
-                    for value in expect_element:
-                        try:
-                            element = self.driver.find_element_by_adaptor(value, **kwargs)
-                            flag = True
-                            break
-                        except NoSuchElementException:
-                            pass
-                    if flag:
-                        if rtn == 1:
-                            return element
-                        elif rtn == 0:
-                            return self
-                        else:
-                            raise ValueError('rtn值不对')
-                if raise_exception:
-                    raise Exception('点击后, 未找到元素列表:%s中的任一元素' % str(expect_element))
-            elif relation == 'and':
-                for times in range(max_retries+1):
-                    self.element.click()
-                    time.sleep(click_wait_time * exponential_base ** times)
-                    elements = list()
-                    for value in expect_element:
-                        try:
-                            element = self.driver.find_element_by_adaptor(value, **kwargs)
-                            elements.append(element)
-                        except NoSuchElementException:
-                            elements = list()
-                            break
-                    if elements:
-                        if rtn == 0:
-                            return self
-                        else:
-                            return elements[rtn-1]
-                if raise_exception:
-                    raise Exception('点击后, 未找到元素列表:%s中的全部元素' % str(expect_element))
-            else:
-                raise ValueError('relation值不对')
-        elif expect_element == 'page_source':
-            page_source = self.element.parent.page_source
-            for times in range(max_retries+1):
-                self.element.click()
-                time.sleep(click_wait_time * exponential_base ** times)
-                if self.element.parent.page_source != page_source:
-                    return self
-            if raise_exception:
-                raise Exception('点击元素【%s】后,未找到期望出现的元素:%s' % (self.name, expect_element))
-        elif expect_element is not None and re.match('\w+$', expect_element):
-            for times in range(max_retries + 1):
-                self.element.click()
-                time.sleep(click_wait_time * exponential_base ** times)
-                if expect_element in self.driver.page_source:
-                    return self
-            if raise_exception:
-                raise Exception(f'点击元素【{self.name}】后,页面未出现"{expect_element}"')
-        elif expect_element is not None:
-            for times in range(max_retries+1):
-                self.element.click()
-                time.sleep(click_wait_time * exponential_base ** times)
-                try:
-                    return self.driver.find_element_by_adaptor(expect_element, **kwargs)
-                except NoSuchElementException:
-                    pass
-            if raise_exception:
-                raise NoSuchElementException('点击元素【%s】后,未找到期望出现的元素:%s' % (self.name, expect_element))
-        else:
-            self.element.click()
-            time.sleep(click_wait_time)
-            return self
+        self.element.click()
 
     def clear(self):
         self.element.clear()
@@ -784,14 +590,14 @@ class MyElement(object):
     def set_text(self, keys=''):
         self.element.set_text(keys)
 
-    def set_value(self, value, raise_excetion=True, prompt=True):
+    def set_value(self, value, raise_exception=True, prompt=True):
         try:
             self.element.set_value(value)
         except Exception as e:
             if prompt:
-                print(e.__repr__())
+                print(e)
                 print_exc()
-            if raise_excetion:
+            if raise_exception:
                 raise
 
     def get_center_position(self):
@@ -799,6 +605,48 @@ class MyElement(object):
         x_center = int(rect['x']+rect['width']/2)
         y_center = int(rect['y']+rect['height']/2)
         return x_center, y_center
+
+    @expectation
+    def tap(self, times, wait_time=2, **kwargs):
+        """
+        点击元素
+        :param times: 点击次数
+        :param wait_time: 完成点击动作后等待时间
+        :param kwargs: 其他参数，传到装饰器中
+        :return: 由参数expect_element的值和实际情况(是否定位到元素)决定
+        """
+        x, y = self.get_center_position()
+        self.touch_action.tap(x=x, y=y, count=times).perform()
+
+    @expectation
+    def multi_tap(self, tap_counts_order: list, interval_between_taps=0.5, random_mode=True, wait_time=2, **kwargs):
+        """
+        功能：多次点击某个元素
+        按照tap_counts_order顺序点击，比如tap_counts_order=[1,1,2]时，先点击1次，再点击1次，最后点击2次。
+        :param tap_counts_order: list类型，点击次数序列
+        :param interval_between_taps: 相邻两次点击之间的间隔
+        :param random_mode: bool类型是否随机选择点击位置
+        :param wait_time: 完成所有点击动作后的等待时间
+        :param kwargs: 其他参数，传到装饰器中
+        :return: 由参数expect_element的值和实际情况(是否定位到元素)决定
+        """
+        rect = self.element.rect
+        x = int(rect['x'])
+        y = int(rect['y'])
+        width = int(rect['width'])
+        height = int(rect['height'])
+        x_center = int(rect['x'] + rect['width'] / 2)
+        y_center = int(rect['y'] + rect['height'] / 2)
+        if random_mode:
+            for count in tap_counts_order:
+                x_to_tap = x + random.choice(range(1, width))
+                y_to_tap = y + random.choice(range(1, height))
+                self.touch_action.tap(x=x_to_tap, y=y_to_tap, count=count).perform().\
+                    wait(interval_between_taps*1000).perform()
+        else:
+            for count in tap_counts_order:
+                self.touch_action.tap(x=x_center, y=y_center, count=count).perform(). \
+                    wait(interval_between_taps * 1000).perform()
 
     def __repr__(self):
         return '<{0.__module__}.{0.__name__} (session="{1}", element="{2}")>, element_name="{3}"'.format(
