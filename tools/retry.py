@@ -1,4 +1,4 @@
-# achen 2019/11/19 
+# achen 2019/11/19
 from config import SENTRY
 from functools import wraps
 from selenium.common.exceptions import NoSuchElementException
@@ -45,6 +45,10 @@ class Retry:
                         print('fail to locate element: %s, retry...' % args[1])
                 time.sleep(poll_frequency*exponential_base**retry_times)
                 retry_times += 1
+            if 'position_dict' in kwargs:
+                kwargs.pop('position_dict')
+            if 'xpath_list' in kwargs:
+                kwargs.pop('xpath_list')
             message = 'retry failed, element information: ' + str(args)[1: -1] + (', ' + str(kwargs) if kwargs else '')
             if prompt:
                 print(message)
