@@ -185,6 +185,8 @@ def expectation(method, _expect_element=EXPECT_ELEMENT, _max_retries=MAX_RETRIES
 
 class MyDriver(object):
     """
+    重新封装WebDriver的常用方法，使用retry装饰器和expectation装饰器。retry装饰器在定位元素失败时自动等待并重试，expectation装饰器
+    一般用来装饰动作，根据期望的元素是否出现，来判断动作是否成功。
     关于expect_element:
     执行某个动作（滑动，返回，点击等）后，会预期页面出现某个元素，根据期望的元素是否出现，来判断动作是否成功。
     这个需求非常普遍，因此应当作为一个基本功能。
@@ -383,7 +385,7 @@ class MyDriver(object):
         if not file_path.endswith('.xml'):
             file_path += '.xml'
         if error:
-            logger_fh = set_logger(log_file_path=file_path, output=False)
+            logger_fh = set_logger(log_file_path=file_path, output=False, name='my_driver_and_element')
             logger_fh.exception("Exception Logged")
         page_source = self.driver.page_source
         with open(file_path, 'a+') as f:
@@ -413,6 +415,22 @@ class MyDriver(object):
         :return: self或者MyElement对象
         """
         self.driver.swipe(start_x, start_y, end_x, end_y, duration)
+
+    @expectation
+    def swipe_up(self, distance, duration=None, wait_time=SWIPE_WAIT_TIME, **kwargs):
+        """
+        屏幕上滑操作(通用接口)
+        """
+        self.driver.swipe(300, 300 + int(distance), 300, 300, duration=duration)
+        time.sleep(3)
+
+    @expectation
+    def swipe_down(self, distance, duration=None, wait_time=SWIPE_WAIT_TIME, **kwargs):
+        """
+        屏幕下滑操作(通用接口)
+        """
+        self.driver.swipe(300, 300, 300, 300 + int(distance), duration=duration)
+        time.sleep(3)
 
     @expectation
     def keyevent(self, keycode, metastate=None, **kwargs):
@@ -448,43 +466,54 @@ class MyDriver(object):
         else:
             return self.adb_tap(element_key=value, position_dict=position_dict, **kwargs)
 
-    def ai_send_keys(self, value, content, position_dict=None, length=None, check=False, **kwargs):
+    def ai_send_keys(self, value, content, position_dict=None, length=None, check=False, max_retries=2, **kwargs):
         """
         功能：参考ai_click的功能说明
         """
+        raise_exception = kwargs.get('raise_exception', True)
         if position_dict is None:
             position_dict = self.position_dict
         if position_dict is None or value not in position_dict:
             my_element = self.find_element_by_xpath(value, position_dict=position_dict, **kwargs)
             if check:
-                my_element.send_keys(content)
+                return my_element.send_keys(content, raise_exception=raise_exception)
             else:
-                my_element.element.send_keys(content)
-            return my_element
+                return my_element.element.send_keys(content)
         else:
             kwargs['expect_element'] = None
             self.adb_tap(element_key=value, position_dict=position_dict, **kwargs)
             self.adb_input_text(content, length)
             if check:
                 position = position_dict[value]
-                raise_exception = kwargs.get('raise_exception', True)
-                if re.search('(\[@text=([\"\']))[\w\s]*(\\2\])$', value):
-                    value = re.sub('(\[@text=([\"\']))[\w\s]*(\\2\])$', '\\1%s\\3' % content, value)
+                if re.search('(\[@text=([\"\'])).*(\\2\])$', value):
+                    value = re.sub('(\[@text=([\"\'])).*(\\2\])$', '\\1%s\\3' % content, value)
                 else:
                     if self.driver.find_element_by_xpath(value).text == '':
                         print('text属性无法获取输入文本内容，无法校验')
                         return self
                     if "'" in value:
-                        value += "[@text='%s']" % content
+                        if value.endswith(']'):
+                            value = value[:-1]+" and @text='%s']" % content
+                        else:
+                            value += "[@text='%s']" % content
                     else:
-                        value += '[@text="%s"]' % content
-                try:
-                    self.driver.find_element_by_xpath(value)
-                except NoSuchElementException:
-                    print(f'ai_send_keys failed：value={value}, content={content}, position={position}')
-                    if raise_exception:
-                        raise
-            return self
+                        if value.endswith(']'):
+                            value = value[:-1]+' and @text="%s"]' % content
+                        else:
+                            value += '[@text="%s"]' % content
+                print('check 元素：', value)
+                for _ in range(max_retries):
+                    try:
+                        self.driver.find_element_by_xpath(value)
+                        return self
+                    except NoSuchElementException:
+                        self.adb_tap(element_key=value, position_dict=position_dict, **kwargs)
+                        self.adb_input_text(content, length)
+                print(f'ai_send_keys failed：value={value}, content={content}, position={position}')
+                if raise_exception:
+                    raise NoSuchElementException('未发现元素【%s】' % value)
+            else:
+                return self
 
     def adb_input_text(self, text, length=None):
         length = length if length is not None else 0
@@ -525,6 +554,13 @@ class MyDriver(object):
         self.driver.back()
 
     def back(self, times=1, wait_time=BACK_WAIT_TIME, **kwargs):
+        """
+        返回上一页面
+        :param times: 返回次数
+        :param wait_time: 等待时间
+        :param kwargs: 
+        :return: 
+        """
         for n in range(times-1):
             self.driver.back()
             time.sleep(wait_time)
@@ -535,11 +571,30 @@ class MyDriver(object):
 
 
 class MyElement(object):
+    """
+    重新封装WebElement的常用方法，使用expectation装饰器。expectation装饰器用来装饰动作，根据期望的元素是否出现，来判断动作是否成功。
+    """
     def __init__(self, web_element, element_name, my_driver):
         self.element = web_element
         self.name = element_name
         self.driver = my_driver
         self.touch_action = TouchAction(self.driver.driver)
+
+    @RETRY.retry_until_done_or_timeout
+    def find_element_by_xpath(self, xpath, element_name=None, position_dict=None, xpath_list=None, **kwargs):
+        """串联定位"""
+        if position_dict is None:
+            position_dict = self.driver.position_dict
+        if xpath_list is None:
+            xpath_list = self.driver.xpath_list
+        element_name = element_name if element_name else xpath
+        element = self.element.find_element_by_xpath(xpath)
+        my_element = MyElement(element, element_name, self.driver)
+        if position_dict is not None and isinstance(position_dict, dict):
+            position_dict[xpath] = my_element.get_center_position()
+        if xpath_list is not None and isinstance(xpath_list, list):
+            xpath_list.append(xpath)
+        return my_element
 
     def send_keys(self, content, max_retries=MAX_RETRIES, raise_exception=True, wait_for_check_when_error_occur=15):
         self.element.send_keys(content)
@@ -647,6 +702,25 @@ class MyElement(object):
             for count in tap_counts_order:
                 self.touch_action.tap(x=x_center, y=y_center, count=count).perform(). \
                     wait(interval_between_taps * 1000).perform()
+
+    def save_image(self, file_name='1.png', serial=None):
+        from PIL import Image
+        from utils import ARCHIVE_PATH
+        serial = serial or self.driver.serial
+        if not serial:
+            raise ValueError('serial为None！')
+        image_path = file_name if file_name.startswith('/') else os.path.join(ARCHIVE_PATH, file_name)
+        pull_to_dir_path, file_name = os.path.split(image_path)
+        # 截图保存到设备里
+        os.system(f'adb -s {serial} shell screencap -p /sdcard/{file_name}')
+        # pull到电脑
+        os.system(f'adb -s {serial} pull /sdcard/{file_name} {pull_to_dir_path}')
+        img = Image.open(image_path)
+        rect = self.element.rect
+        box = rect['x'], rect['y'], rect['x'] + rect['width'], rect['y'] + rect['height']
+        cropped = img.crop(box)
+        cropped.save(image_path)
+        print(f'保存element图片到文件 {image_path}     ok')
 
     def __repr__(self):
         return '<{0.__module__}.{0.__name__} (session="{1}", element="{2}")>, element_name="{3}"'.format(
